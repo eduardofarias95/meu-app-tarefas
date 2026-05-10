@@ -567,17 +567,86 @@ let fromEmailId=null,activePeriod='all',activeTagFilters=new Set();
 let calYear=new Date().getFullYear(),calMonth=new Date().getMonth();
 let currentUser=null;
 
-const emails=[
-  {id:'m1',from:'Lucas Moreira',email:'lucas@yuool.com.br',subject:'Resultados da campanha de maio — precisamos conversar',preview:'Oi Eduardo, vi os números e acho que precisamos ajustar a estratégia...',time:'09:14',avatar:'L'},
-  {id:'m2',from:'Manu Costa',email:'manu@yuool.com.br',subject:'1:1 desta semana — pauta atualizada',preview:'Adicionei alguns pontos novos na pauta do nosso 1:1...',time:'08:30',avatar:'M'},
-  {id:'m3',from:'Google Workspace',email:'noreply@google.com',subject:'Renovação do plano — ação necessária até 15/05',preview:'Sua assinatura do Google Workspace Business vence em 6 dias...',time:'Ontem',avatar:'G'},
-  {id:'m4',from:'nowle',email:'hello@nowle.io',subject:'Relatório semanal de influenciadores — semana 18',preview:'Confira o desempenho dos seus influenciadores...',time:'Ontem',avatar:'N'},
-  {id:'m5',from:'Júlia Mendes',email:'julia@agenciaX.com.br',subject:'Proposta de parceria — campanha Q3',preview:'Olá Eduardo! Conforme conversamos, segue a proposta...',time:'08/05',avatar:'J'},
-];
+let gmailMessages=[];
+let gmailLoaded=false;
+
+async function fetchGmailMessages(){
+  const c=document.getElementById('email-list');
+  if(!c)return;
+  c.innerHTML='<div class="loading-screen" style="padding:32px"><i class="ti ti-loader-2"></i><p>Carregando e-mails...</p></div>';
+  try{
+    const{data:{session}}=await db.auth.getSession();
+    const token=session?.provider_token;
+    if(!token){
+      c.innerHTML=`<div style="text-align:center;padding:32px 16px;color:var(--t2)">
+        <i class="ti ti-mail-off" style="font-size:32px;display:block;margin-bottom:12px;color:var(--bd2)"></i>
+        <p style="font-size:13px;font-weight:500;margin-bottom:6px">Permissão do Gmail necessária</p>
+        <p style="font-size:12px;margin-bottom:16px">Faça logout e entre novamente para liberar o acesso.</p>
+        <button onclick="reconnectGoogle()" style="padding:9px 18px;border-radius:9px;border:none;background:var(--ac);color:#fff;font-size:13px;font-weight:500;cursor:pointer">Reconectar com Google</button>
+      </div>`;
+      return;
+    }
+    const listRes=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&labelIds=INBOX',{
+      headers:{Authorization:`Bearer ${token}`}
+    });
+    if(!listRes.ok){
+      c.innerHTML=`<div style="text-align:center;padding:32px 16px;color:var(--t2)">
+        <i class="ti ti-lock" style="font-size:32px;display:block;margin-bottom:12px;color:var(--bd2)"></i>
+        <p style="font-size:13px;font-weight:500;margin-bottom:6px">Sessão expirada</p>
+        <p style="font-size:12px;margin-bottom:16px">Faça logout e entre novamente.</p>
+        <button onclick="reconnectGoogle()" style="padding:9px 18px;border-radius:9px;border:none;background:var(--ac);color:#fff;font-size:13px;font-weight:500;cursor:pointer">Reconectar</button>
+      </div>`;
+      return;
+    }
+    const listData=await listRes.json();
+    const msgs=listData.messages||[];
+    if(!msgs.length){
+      c.innerHTML='<div class="empty-state"><i class="ti ti-inbox"></i><p>Caixa de entrada vazia</p></div>';
+      return;
+    }
+    const details=await Promise.all(msgs.map(async m=>{
+      const r=await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+        {headers:{Authorization:`Bearer ${token}`}}
+      );
+      return r.json();
+    }));
+    gmailMessages=details.map(d=>{
+      const headers=d.payload?.headers||[];
+      const get=name=>headers.find(h=>h.name===name)?.value||'';
+      const fromRaw=get('From');
+      const fromName=fromRaw.includes('<')?fromRaw.split('<')[0].trim().replace(/^"|"$/g,''):fromRaw.split('@')[0];
+      const fromEmail=fromRaw.match(/<(.+)>/)?.[1]||fromRaw;
+      const subject=get('Subject')||'(sem assunto)';
+      const snippet=d.snippet||'';
+      const dateRaw=get('Date');
+      const date=dateRaw?new Date(dateRaw):new Date();
+      const today=new Date();today.setHours(0,0,0,0);
+      const msgDate=new Date(date);msgDate.setHours(0,0,0,0);
+      const diffDays=Math.round((msgDate-today)/86400000);
+      let timeStr;
+      if(diffDays===0)timeStr=date.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+      else if(diffDays===-1)timeStr='Ontem';
+      else if(diffDays>-7)timeStr=date.toLocaleDateString('pt-BR',{weekday:'short'}).replace('.','');
+      else timeStr=date.toLocaleDateString('pt-BR',{day:'2-digit',month:'short'});
+      return{id:d.id,from:fromName||fromEmail,email:fromEmail,subject,preview:snippet.replace(/&amp;/g,'&').replace(/&#39;/g,"'").slice(0,120),time:timeStr,avatar:(fromName||fromEmail).charAt(0).toUpperCase(),gmailLink:`https://mail.google.com/mail/u/0/#inbox/${d.id}`};
+    });
+    gmailLoaded=true;
+    renderEmailList();
+  }catch(err){
+    console.error('Gmail error:',err);
+    if(c)c.innerHTML=`<div style="text-align:center;padding:32px 16px;color:var(--t2)"><i class="ti ti-alert-circle" style="font-size:32px;display:block;margin-bottom:12px;color:var(--red)"></i><p style="font-size:13px;font-weight:500;margin-bottom:16px">Erro ao carregar e-mails</p><button onclick="fetchGmailMessages()" style="padding:9px 18px;border-radius:9px;border:none;background:var(--ac);color:#fff;font-size:13px;font-weight:500;cursor:pointer">Tentar novamente</button></div>`;
+  }
+}
+
+async function reconnectGoogle(){
+  await db.auth.signOut();
+  await db.auth.signInWithOAuth({provider:'google',options:{redirectTo:window.location.href,scopes:'https://www.googleapis.com/auth/gmail.readonly'}});
+}
 
 // === AUTH ===
 async function loginWithGoogle(){
-  await db.auth.signInWithOAuth({provider:'google',options:{redirectTo:window.location.href}});
+  await db.auth.signInWithOAuth({provider:'google',options:{redirectTo:window.location.href,scopes:'https://www.googleapis.com/auth/gmail.readonly'}});
 }
 async function logout(){
   await db.auth.signOut();
@@ -844,20 +913,27 @@ function changeMonth(d){calMonth+=d;if(calMonth>11){calMonth=0;calYear++;}if(cal
 function goToday(){calYear=new Date().getFullYear();calMonth=new Date().getMonth();renderCalGrid();}
 
 function renderEmailList(){
-  const c=document.getElementById('email-list');if(!c)return;c.innerHTML='';
-  emails.forEach(em=>{
+  const c=document.getElementById('email-list');if(!c)return;
+  if(!gmailLoaded)return;
+  c.innerHTML='';
+  if(!gmailMessages.length){
+    c.innerHTML='<div class="empty-state"><i class="ti ti-inbox"></i><p>Nenhum e-mail encontrado</p></div>';
+    return;
+  }
+  gmailMessages.forEach(em=>{
     const linked=tasks.find(t=>t.emailId===em.id);
     const card=document.createElement('div');card.className='email-card';
     let acts=linked
       ?`<span class="email-linked"><i class="ti ti-circle-check"></i>${linked.name.slice(0,35)}</span><button style="background:transparent;border:none;cursor:pointer;font-size:12px;color:var(--t2);margin-left:4px" onclick="openDetail('${linked.id}')">Ver →</button>`
       :`<button class="btn-et" onclick="createFromEmail('${em.id}')"><i class="ti ti-plus"></i> Criar tarefa</button>`;
-    card.innerHTML=`<div class="email-main"><div class="email-avatar">${em.avatar}</div><div class="email-body"><div class="email-from">${em.from}<span class="email-time">${em.time}</span></div><div class="email-subject">${em.subject}</div><div class="email-preview">${em.preview}</div></div></div><div class="email-actions">${acts}</div>`;
+    const openGmail=em.gmailLink?`<a href="${em.gmailLink}" target="_blank" style="font-size:11px;color:var(--t2);text-decoration:none;display:flex;align-items:center;gap:3px;margin-left:auto"><i class="ti ti-external-link" style="font-size:12px"></i>Abrir</a>`:'';
+    card.innerHTML=`<div class="email-main"><div class="email-avatar">${em.avatar}</div><div class="email-body"><div class="email-from">${em.from}<span class="email-time">${em.time}</span></div><div class="email-subject">${em.subject}</div><div class="email-preview">${em.preview}</div></div></div><div class="email-actions">${acts}${openGmail}</div>`;
     c.appendChild(card);
   });
 }
 
 function createFromEmail(emailId){
-  const em=emails.find(e=>e.id===emailId);if(!em)return;
+  const em=gmailMessages.find(e=>e.id===emailId);if(!em)return;
   fromEmailId=emailId;
   openSheet(null,{name:em.subject.length>60?em.subject.slice(0,57)+'…':em.subject,originType:'email',originText:`De: ${em.from} — ${em.subject.slice(0,40)}`});
 }
@@ -896,7 +972,7 @@ async function saveTask(){
     const t=tasks.find(x=>x.id===editingId);
     if(t){t.name=name;t.status=document.getElementById('sh-status').value;t.prio=document.getElementById('sh-prio').value;t.tag=document.getElementById('sh-tag').value;t.due=document.getElementById('sh-due').value;t.rec=document.getElementById('sh-rec').value;await upsertTask(t);}
   }else{
-    const em=emailId?emails.find(e=>e.id===emailId):null;
+    const em=emailId?gmailMessages.find(e=>e.id===emailId):null;
     const newTask={id:uid(),name,status:document.getElementById('sh-status').value,prio:document.getElementById('sh-prio').value,tag:document.getElementById('sh-tag').value,due:document.getElementById('sh-due').value,rec:document.getElementById('sh-rec').value,notes:em?`De: ${em.from} <${em.email}>\nAssunto: ${em.subject}`:'',subtasks:[],createdAt:Date.now(),calEventId:'',emailId:emailId||'',emailLink:emailId?`https://mail.google.com/mail/u/0/#inbox/${emailId}`:''};
     tasks.unshift(newTask);await upsertTask(newTask);
   }
@@ -964,6 +1040,7 @@ function switchView(v){
     const p=document.getElementById('pane-'+x);if(p)p.classList.toggle('show',x===v);
     const tb=document.getElementById('tab-'+x);if(tb)tb.classList.toggle('active',x===v);
   });
+  if(v==='email'&&!gmailLoaded)fetchGmailMessages();
 }
 
 // === DARK MODE ===
